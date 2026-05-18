@@ -1,4 +1,3 @@
-```yaml
 name: Build Arch Linux Package
 
 on:
@@ -145,4 +144,3 @@ jobs:
           tag: ${{ github.ref }}
           file_glob: true
           file: archpkgs/*/*.pkg.tar.zst
-```
