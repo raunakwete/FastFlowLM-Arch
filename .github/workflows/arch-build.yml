@@ -100,19 +100,9 @@ jobs:
             rust
           )
 
-          build() {
-            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
-            cmake -B build \
-              -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr
-            cmake --build build
-          }
+          build() { cd "${srcdir}/fastflowlm-${pkgver}/src" cmake -B build \ -G Ninja \ -DCMAKE_BUILD_TYPE=Release \ -DCMAKE_INSTALL_PREFIX=/usr \ -DFLM_VERSION="${pkgver}" cmake --build build }
 
-          package() {
-            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
-            DESTDIR="\${pkgdir}" cmake --install build
-          }
+          package() { cd "${srcdir}/fastflowlm-${pkgver}/src" DESTDIR="${pkgdir}" cmake --install build }
           EOF
 
       - name: Fix permissions
