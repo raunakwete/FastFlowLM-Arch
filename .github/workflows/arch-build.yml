@@ -51,8 +51,6 @@ jobs:
           VERSION="$(git describe --tags --long --always)"
           VERSION="${VERSION#v}"
 
-          # Convert git-describe output into an Arch-friendly pkgver:
-          # 1.2.3-4-gabc1234 -> 1.2.3.r4.gabc1234
           if [[ "$VERSION" =~ ^(.+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
             PKG_VERSION="${BASH_REMATCH[1]}.r${BASH_REMATCH[2]}.g${BASH_REMATCH[3]}"
           else
@@ -103,7 +101,7 @@ jobs:
           )
 
           build() {
-            cd "\${srcdir}/fastflowlm-\${pkgver}"
+            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
             cmake -B build \
               -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
@@ -112,7 +110,7 @@ jobs:
           }
 
           package() {
-            cd "\${srcdir}/fastflowlm-\${pkgver}"
+            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
             DESTDIR="\${pkgdir}" cmake --install build
           }
           EOF
