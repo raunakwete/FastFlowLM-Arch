@@ -14,9 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/fastflowlm/fastflowlm/build-environment:archlatest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
