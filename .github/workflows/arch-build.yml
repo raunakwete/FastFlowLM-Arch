@@ -1,4 +1,4 @@
-name: Build Packages
+name: Build Arch Linux Package
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
       image: archlinux:latest
 
     steps:
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           pacman -Syu --noconfirm --needed \
             base-devel \
@@ -42,52 +42,48 @@ jobs:
           fetch-tags: true
 
       - name: Configure git safe directory
-        run: git config --global --add safe.directory "$(pwd)"
+        run: |
+          git config --global --add safe.directory "$(pwd)"
 
-      - name: Get version from git describe
-        id: get_version
+      - name: Get package version
+        id: version
         shell: bash
         run: |
-          VERSION="$(git describe --tags --long --always)"
+          VERSION="$(git describe --tags --always)"
           VERSION="${VERSION#v}"
 
-          if [[ "$VERSION" =~ ^(.+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
-            PKG_VERSION="${BASH_REMATCH[1]}.r${BASH_REMATCH[2]}.g${BASH_REMATCH[3]}"
-          else
-            PKG_VERSION="$VERSION"
-          fi
-
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Get short SHA
         id: short_sha
-        run: echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Create source tarball
         shell: bash
         run: |
+          mkdir -p dist
+
           git archive \
             --format=tar.gz \
-            --prefix=fastflowlm-${{ steps.get_version.outputs.pkg_version }}/ \
-            -o fastflowlm-${{ steps.get_version.outputs.pkg_version }}.tar.gz \
-            HEAD
-          ls -lah fastflowlm-*.tar.gz
+            --prefix=fastflowlm-${{ steps.version.outputs.version }}/ \
+            HEAD \
+            -o dist/fastflowlm-${{ steps.version.outputs.version }}.tar.gz
+
+          ls -lah dist/
 
       - name: Generate PKGBUILD
         shell: bash
         run: |
           cat > PKGBUILD <<EOF
           pkgname=fastflowlm
-          pkgver=${{ steps.get_version.outputs.pkg_version }}
+          pkgver=${{ steps.version.outputs.version }}
           pkgrel=1
           pkgdesc="FastFlowLM - Ryzen AI NPU optimized LLM runtime"
           arch=('x86_64')
           url="https://github.com/FastFlowLM/FastFlowLM"
           license=('MIT')
-
-          source=("fastflowlm-\${pkgver}.tar.gz")
-          sha256sums=('SKIP')
 
           depends=(
             gcc-libs
@@ -98,29 +94,55 @@ jobs:
             cmake
             ninja
             rust
+            git
           )
 
-          build() { cd "${srcdir}/fastflowlm-${pkgver}/src" cmake -B build \ -G Ninja \ -DCMAKE_BUILD_TYPE=Release \ -DCMAKE_INSTALL_PREFIX=/usr \ -DFLM_VERSION="${pkgver}" cmake --build build }
+          source=("fastflowlm-\${pkgver}.tar.gz")
+          sha256sums=('SKIP')
 
-          package() { cd "${srcdir}/fastflowlm-${pkgver}/src" DESTDIR="${pkgdir}" cmake --install build }
+          build() {
+            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
+
+            cmake -B build \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/usr \
+              -DFLM_VERSION="\${pkgver}"
+
+            cmake --build build
+          }
+
+          package() {
+            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
+
+            DESTDIR="\${pkgdir}" cmake --install build
+          }
           EOF
+
+      - name: Move sources beside PKGBUILD
+        run: |
+          cp dist/*.tar.gz .
 
       - name: Fix permissions
         run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
 
-      - name: Build Arch package
+      - name: Build package
+        shell: bash
         run: |
           runuser -u builder -- bash -lc '
             cd "$GITHUB_WORKSPACE"
+
             export MAKEFLAGS="-j$(nproc)"
-            makepkg -f --noconfirm
+
+            makepkg -sf --noconfirm
           '
 
-      - name: List generated packages
-        run: ls -lah *.pkg.tar.zst
+      - name: Verify generated package
+        run: |
+          ls -lah *.pkg.tar.zst
 
-      - name: Upload Arch package artifact
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: flm-archlinux-${{ steps.short_sha.outputs.sha }}
@@ -130,21 +152,23 @@ jobs:
   release:
     permissions:
       contents: write
+
     runs-on: ubuntu-latest
     needs: package-arch
+
     if: github.ref_type == 'tag'
 
     steps:
-      - name: Download Arch package artifact
+      - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
-          path: archpkgs
+          path: packages
           pattern: flm-archlinux-*
 
-      - name: Upload Arch package to Release
+      - name: Upload release assets
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
           file_glob: true
-          file: archpkgs/**/*.pkg.tar.zst
+          file: packages/**/*.pkg.tar.zst
