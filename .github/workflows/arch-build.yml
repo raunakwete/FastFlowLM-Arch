@@ -1,5 +1,4 @@
-name: Build Arch Linux Package
-
+name: Build Arch Package
 on:
   push:
     branches:
@@ -10,165 +9,86 @@ on:
     branches:
       - main
   workflow_dispatch:
-
 jobs:
-  package-arch:
+  package-pkg:
     runs-on: ubuntu-latest
-
     container:
-      image: archlinux:latest
-
+      image: ghcr.io/fastflowlm/fastflowlm/build-environment:archlatest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install dependencies
-        run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel \
-            git \
-            cmake \
-            ninja \
-            rust \
-            curl \
-            ca-certificates
-
-      - name: Create build user
-        run: |
-          useradd -m builder
-
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
           fetch-tags: true
-
       - name: Configure git safe directory
+        run: git config --global --add safe.directory $(pwd)
+      - name: Get version from git describe
+        id: get_version
         run: |
-          git config --global --add safe.directory "$(pwd)"
-
-      - name: Get package version
-        id: version
-        shell: bash
-        run: |
-          VERSION="$(git describe --tags --always)"
-          VERSION="${VERSION#v}"
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
+          VERSION=$(git describe --tags --always)
+          PKG_VERSION=$(echo "${VERSION}" | sed 's/^v//' | sed 's/-/./g')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "pkg_version=${PKG_VERSION}" >> $GITHUB_OUTPUT
       - name: Get short SHA
         id: short_sha
-        shell: bash
+        run: echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+      - name: Create Arch packaging metadata
         run: |
-          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Create source tarball
-        shell: bash
+          sed -e "s|@@PKG_VERSION@@|${{ steps.get_version.outputs.pkg_version }}|g" \
+              arch/PKGBUILD.in > arch/PKGBUILD
+      - name: Upgrade Rust toolchain
         run: |
-          mkdir -p dist
-
-          git archive \
-            --format=tar.gz \
-            --prefix=fastflowlm-${{ steps.version.outputs.version }}/ \
-            HEAD \
-            -o dist/fastflowlm-${{ steps.version.outputs.version }}.tar.gz
-
-          ls -lah dist/
-
-      - name: Generate PKGBUILD
-        shell: bash
+          pacman -Sy --noconfirm curl ca-certificates
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          rustc --version
+      - name: Build Arch package
+        working-directory: ${{ github.workspace }}/arch
+        env:
+          PKG_VERSION: ${{ steps.get_version.outputs.pkg_version }}
         run: |
-          cat > PKGBUILD <<EOF
-          pkgname=fastflowlm
-          pkgver=${{ steps.version.outputs.version }}
-          pkgrel=1
-          pkgdesc="FastFlowLM - Ryzen AI NPU optimized LLM runtime"
-          arch=('x86_64')
-          url="https://github.com/FastFlowLM/FastFlowLM"
-          license=('MIT')
-
-          depends=(
-            gcc-libs
-            glibc
-          )
-
-          makedepends=(
-            cmake
-            ninja
-            rust
-            git
-          )
-
-          source=("fastflowlm-\${pkgver}.tar.gz")
-          sha256sums=('SKIP')
-
-          build() {
-            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
-
-            cmake -B build \
-              -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr \
-              -DFLM_VERSION="\${pkgver}"
-
-            cmake --build build
-          }
-
-          package() {
-            cd "\${srcdir}/fastflowlm-\${pkgver}/src"
-
-            DESTDIR="\${pkgdir}" cmake --install build
-          }
-          EOF
-
-      - name: Move sources beside PKGBUILD
-        run: |
-          cp dist/*.tar.gz .
-
-      - name: Fix permissions
-        run: |
-          chown -R builder:builder "$GITHUB_WORKSPACE"
-
-      - name: Build package
-        shell: bash
-        run: |
-          runuser -u builder -- bash -lc '
-            cd "$GITHUB_WORKSPACE"
-
-            export MAKEFLAGS="-j$(nproc)"
-
-            makepkg -sf --noconfirm
-          '
-
-      - name: Verify generated package
-        run: |
-          ls -lah *.pkg.tar.zst
-
-      - name: Upload package artifact
+          useradd -m builder
+          chown -R builder:builder ${{ github.workspace }}
+          su builder -c "makepkg -s --noconfirm --nodeps"
+          mv fastflowlm-*.pkg.tar.zst \
+            ${{ github.workspace }}/fastflowlm_${PKG_VERSION}_arch_x86_64.pkg.tar.zst
+          ls -lah ${{ github.workspace }}/fastflowlm_${PKG_VERSION}_arch_x86_64.pkg.tar.zst
+      - name: Upload Arch package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flm-archlinux-${{ steps.short_sha.outputs.sha }}
-          path: "*.pkg.tar.zst"
+          name: flm-archlatest-${{ steps.short_sha.outputs.sha }}-pkg
+          path: ./fastflowlm_${{ steps.get_version.outputs.pkg_version }}_arch_x86_64.pkg.tar.zst
           if-no-files-found: error
-
   release:
     permissions:
       contents: write
-
     runs-on: ubuntu-latest
-    needs: package-arch
-
+    needs: package-pkg
     if: github.ref_type == 'tag'
-
     steps:
-      - name: Download package artifacts
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get version from git describe
+        id: get_version
+        run: |
+          VERSION=$(git describe --tags --always)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+      - name: Download all pkg artifacts
         uses: actions/download-artifact@v4
         with:
           path: packages
-          pattern: flm-archlinux-*
-
-      - name: Upload release assets
+          pattern: '*-pkg'
+      - name: Upload Binaries to Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ github.ref_name }}
+          tag: ${{ github.ref }}
           file_glob: true
-          file: packages/**/*.pkg.tar.zst
+          file: packages/*/*.pkg.tar.zst
