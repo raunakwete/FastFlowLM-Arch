@@ -1,4 +1,4 @@
-name: Build Arch Linux Package
+name: Build Packages
 
 on:
   push:
@@ -17,25 +17,25 @@ jobs:
 
     container:
       image: archlinux:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Install build dependencies
         run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm \
+          pacman -Syu --noconfirm --needed \
             base-devel \
             git \
             cmake \
             ninja \
-            rustup \
-            curl
-
-          rustup default stable
+            rust \
+            curl \
+            ca-certificates
 
       - name: Create build user
         run: |
           useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,31 +45,54 @@ jobs:
           fetch-tags: true
 
       - name: Configure git safe directory
-        run: git config --global --add safe.directory $(pwd)
+        run: git config --global --add safe.directory "$(pwd)"
 
       - name: Get version from git describe
         id: get_version
+        shell: bash
         run: |
-          VERSION=$(git describe --tags --always)
-          PKG_VERSION=$(echo "${VERSION}" | sed 's/^v//')
+          VERSION="$(git describe --tags --long --always)"
+          VERSION="${VERSION#v}"
 
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "pkg_version=${PKG_VERSION}" >> $GITHUB_OUTPUT
+          # Convert git-describe output into an Arch-friendly pkgver:
+          # 1.2.3-4-gabc1234 -> 1.2.3.r4.gabc1234
+          if [[ "$VERSION" =~ ^(.+)-([0-9]+)-g([0-9a-f]+)$ ]]; then
+            PKG_VERSION="${BASH_REMATCH[1]}.r${BASH_REMATCH[2]}.g${BASH_REMATCH[3]}"
+          else
+            PKG_VERSION="$VERSION"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Get short SHA
         id: short_sha
-        run: echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+        run: echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Create source tarball
+        shell: bash
+        run: |
+          git archive \
+            --format=tar.gz \
+            --prefix=fastflowlm-${{ steps.get_version.outputs.pkg_version }}/ \
+            -o fastflowlm-${{ steps.get_version.outputs.pkg_version }}.tar.gz \
+            HEAD
+          ls -lah fastflowlm-*.tar.gz
 
       - name: Generate PKGBUILD
+        shell: bash
         run: |
-          cat > PKGBUILD << 'EOF'
+          cat > PKGBUILD <<EOF
           pkgname=fastflowlm
-          pkgver=${PKG_VERSION}
+          pkgver=${{ steps.get_version.outputs.pkg_version }}
           pkgrel=1
           pkgdesc="FastFlowLM - Ryzen AI NPU optimized LLM runtime"
           arch=('x86_64')
           url="https://github.com/FastFlowLM/FastFlowLM"
           license=('MIT')
+
+          source=("fastflowlm-\${pkgver}.tar.gz")
+          sha256sums=('SKIP')
 
           depends=(
             gcc-libs
@@ -79,38 +102,34 @@ jobs:
           makedepends=(
             cmake
             ninja
-            git
             rust
           )
 
-          source=(".")
-          sha256sums=('SKIP')
-
           build() {
+            cd "\${srcdir}/fastflowlm-\${pkgver}"
             cmake -B build \
               -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX=/usr
-
             cmake --build build
           }
 
           package() {
-            DESTDIR="${pkgdir}" cmake --install build
+            cd "\${srcdir}/fastflowlm-\${pkgver}"
+            DESTDIR="\${pkgdir}" cmake --install build
           }
           EOF
 
-          sed -i "s|\${PKG_VERSION}|${{ steps.get_version.outputs.pkg_version }}|g" PKGBUILD
-
       - name: Fix permissions
         run: |
-          chown -R builder:builder .
+          chown -R builder:builder "$GITHUB_WORKSPACE"
 
       - name: Build Arch package
         run: |
-          sudo -u builder bash -c '
+          runuser -u builder -- bash -lc '
+            cd "$GITHUB_WORKSPACE"
             export MAKEFLAGS="-j$(nproc)"
-            makepkg -sf --noconfirm
+            makepkg -f --noconfirm
           '
 
       - name: List generated packages
@@ -131,16 +150,16 @@ jobs:
     if: github.ref_type == 'tag'
 
     steps:
-      - name: Download Arch package artifacts
+      - name: Download Arch package artifact
         uses: actions/download-artifact@v4
         with:
           path: archpkgs
-          pattern: 'flm-archlinux-*'
+          pattern: flm-archlinux-*
 
-      - name: Upload Arch Packages to Release
+      - name: Upload Arch package to Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ github.ref }}
+          tag: ${{ github.ref_name }}
           file_glob: true
-          file: archpkgs/*/*.pkg.tar.zst
+          file: archpkgs/**/*.pkg.tar.zst
